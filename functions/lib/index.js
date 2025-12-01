@@ -34,8 +34,12 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.api = void 0;
+const app_1 = require("firebase-admin/app");
+const firestore_1 = require("firebase-admin/firestore");
 const https_1 = require("firebase-functions/v2/https");
 const logger = __importStar(require("firebase-functions/logger"));
+const app = (0, app_1.initializeApp)();
+const db = (0, firestore_1.getFirestore)(app);
 const BOOKS = [
     {
         id: "little-women",
@@ -92,7 +96,15 @@ function buildReadingPlan(book, sessionsPerWeek) {
         sessions
     };
 }
-exports.api = (0, https_1.onRequest)((req, res) => {
+function getUid(req) {
+    const header = req.headers["x-user-id"];
+    if (typeof header === "string" && header.trim().length > 0) {
+        return header;
+    }
+    // POC: 아직 auth 안 붙였으니 데모 유저 고정
+    return "demo-user";
+}
+exports.api = (0, https_1.onRequest)(async (req, res) => {
     res.set("Access-Control-Allow-Origin", "*");
     res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
     res.set("Access-Control-Allow-Headers", "Content-Type");
@@ -122,6 +134,138 @@ exports.api = (0, https_1.onRequest)((req, res) => {
             count: BOOKS.length,
             items: BOOKS
         });
+        return;
+    }
+    // 5) 진행도 완료 체크: POST /api/progress/complete
+    if (req.method === "POST" && path === "/progress/complete") {
+        const uid = getUid(req);
+        const body = req.body || {};
+        const { bookId, trackId, segmentIndex, timeSpentMinutes } = body;
+        if (!bookId || !trackId || !segmentIndex) {
+            res.status(400).json({
+                ok: false,
+                error: "bookId, trackId, segmentIndex는 필수입니다."
+            });
+            return;
+        }
+        const segIndexNum = parseInt(segmentIndex, 10);
+        const timeSpent = Number(timeSpentMinutes || 0);
+        const now = new Date();
+        const isoDate = now.toISOString().slice(0, 10); // YYYY-MM-DD
+        const progressDocId = `${uid}_${bookId}_${trackId}_${segIndexNum}`;
+        const progressRef = db.collection("userProgress").doc(progressDocId);
+        await progressRef.set({
+            uid,
+            bookId,
+            trackId,
+            segmentIndex: segIndexNum,
+            status: "done",
+            completedAt: now.toISOString(),
+            timeSpentMinutes: timeSpent
+        }, { merge: true });
+        const logDocId = `${uid}_${isoDate}`;
+        const logRef = db.collection("studyLogs").doc(logDocId);
+        await logRef.set({
+            uid,
+            date: isoDate,
+            updatedAt: firestore_1.FieldValue.serverTimestamp(),
+            totalSegmentsCompleted: firestore_1.FieldValue.increment(1),
+            totalStudyMinutes: firestore_1.FieldValue.increment(timeSpent)
+        }, { merge: true });
+        res.status(200).json({
+            ok: true,
+            message: "학습 완료가 저장되었습니다.",
+            date: isoDate,
+            segmentIndex: segIndexNum
+        });
+        return;
+    }
+    // 6) 진행도 요약: GET /api/progress/summary?bookId=...&trackId=...
+    if (req.method === "GET" && path === "/progress/summary") {
+        const uid = getUid(req);
+        const bookId = req.query.bookId;
+        const trackId = req.query.trackId;
+        if (!bookId || !trackId) {
+            res.status(400).json({
+                ok: false,
+                error: "bookId와 trackId 쿼리 파라미터가 필요합니다."
+            });
+            return;
+        }
+        const snap = await db
+            .collection("userProgress")
+            .where("uid", "==", uid)
+            .where("bookId", "==", bookId)
+            .where("trackId", "==", trackId)
+            .where("status", "==", "done")
+            .get();
+        const completedCount = snap.size;
+        // POC: 일단 30개 트랙 고정
+        const totalChapters = 30;
+        const completionRate = totalChapters
+            ? completedCount / totalChapters
+            : 0;
+        let lastCompletedSegment = null;
+        snap.forEach((doc) => {
+            const data = doc.data();
+            if (typeof data.segmentIndex === "number") {
+                if (lastCompletedSegment === null) {
+                    lastCompletedSegment = data.segmentIndex;
+                }
+                else {
+                    lastCompletedSegment = Math.max(lastCompletedSegment, data.segmentIndex);
+                }
+            }
+        });
+        res.status(200).json({
+            ok: true,
+            bookId,
+            trackId,
+            totalChapters,
+            completedCount,
+            completionRate,
+            lastCompletedSegment
+        });
+        return;
+    }
+    // 7) 캘린더용 로그: GET /api/progress/calendar?month=YYYY-MM
+    // 7) 캘린더용 로그: GET /api/progress/calendar?month=YYYY-MM
+    if (req.method === "GET" && path === "/progress/calendar") {
+        try {
+            const uid = getUid(req);
+            const monthParam = req.query.month || "";
+            const now = new Date();
+            const year = monthParam
+                ? parseInt(monthParam.slice(0, 4), 10)
+                : now.getFullYear();
+            const month = monthParam
+                ? parseInt(monthParam.slice(5, 7), 10)
+                : now.getMonth() + 1; // JS month는 0-based
+            const monthStr = `${year}-${String(month).padStart(2, "0")}`;
+            const startDate = `${monthStr}-01`;
+            const endDate = `${monthStr}-31`;
+            const snap = await db
+                .collection("studyLogs")
+                .where("uid", "==", uid)
+                .where("date", ">=", startDate)
+                .where("date", "<=", endDate)
+                .orderBy("date", "asc")
+                .get();
+            const items = snap.docs.map((doc) => doc.data());
+            res.status(200).json({
+                ok: true,
+                month: monthStr,
+                count: items.length,
+                items
+            });
+        }
+        catch (e) {
+            logger.error("Error in /progress/calendar", e);
+            res.status(500).json({
+                ok: false,
+                error: e?.message || "캘린더 데이터를 불러오는 중 오류가 발생했습니다."
+            });
+        }
         return;
     }
     // GET /api/books/:id/chapters
