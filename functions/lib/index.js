@@ -389,7 +389,7 @@ exports.api = (0, https_1.onRequest)(async (req, res) => {
             const contextEntry = contextText
                 ? {
                     text: String(contextText),
-                    createdAt: firestore_1.FieldValue.serverTimestamp()
+                    createdAt: new Date().toISOString()
                 }
                 : null;
             const updateData = {
@@ -434,7 +434,8 @@ exports.api = (0, https_1.onRequest)(async (req, res) => {
             if (bookId) {
                 query = query.where("bookId", "==", bookId);
             }
-            const snap = await query.orderBy("updatedAt", "desc").limit(200).get();
+            // 🔧 정렬은 잠깐 빼고, 인덱스 없이 최대 200개만 가져오도록
+            const snap = await query.limit(200).get();
             const items = snap.docs.map((doc) => ({
                 id: doc.id,
                 ...doc.data()
@@ -580,40 +581,72 @@ exports.api = (0, https_1.onRequest)(async (req, res) => {
         return;
     }
     // GET /api/insights?bookId=...&trackId=...&segmentIndex=...
+    // - bookId + segmentIndex 있으면: 해당 세그먼트의 단일 노트
+    // - bookId만 있으면: 해당 책의 모든 노트 목록
     if (req.method === "GET" && path === "/insights") {
         const uid = getUid(req);
         const bookId = req.query.bookId;
         const trackId = req.query.trackId;
         const segmentIndexRaw = req.query.segmentIndex;
-        if (!bookId || !segmentIndexRaw) {
+        if (!bookId) {
             res.status(400).json({
                 ok: false,
-                error: "bookId와 segmentIndex는 필수입니다."
+                error: "bookId는 필수입니다."
             });
             return;
         }
-        const segIndexNum = Number(segmentIndexRaw);
-        const docId = `${uid}_${bookId}_${trackId || "default"}_${segIndexNum}`;
-        try {
-            const ref = db.collection("userInsights").doc(docId);
-            const doc = await ref.get();
-            if (!doc.exists) {
+        // 1) 세그먼트 단일 조회 모드
+        if (segmentIndexRaw) {
+            const segIndexNum = Number(segmentIndexRaw);
+            const docId = `${uid}_${bookId}_${trackId || "default"}_${segIndexNum}`;
+            try {
+                const ref = db.collection("userInsights").doc(docId);
+                const doc = await ref.get();
+                if (!doc.exists) {
+                    res.status(200).json({
+                        ok: true,
+                        note: null
+                    });
+                    return;
+                }
                 res.status(200).json({
                     ok: true,
-                    note: null
+                    note: doc.data()?.note || ""
                 });
-                return;
             }
+            catch (e) {
+                logger.error("Error in /insights (GET single)", e);
+                res.status(500).json({
+                    ok: false,
+                    error: e?.message || "인사이트를 불러오는 중 오류가 발생했습니다."
+                });
+            }
+            return;
+        }
+        // 2) 책 단위 목록 조회 모드: /api/insights?bookId=...
+        try {
+            let query = db
+                .collection("userInsights")
+                .where("uid", "==", uid)
+                .where("bookId", "==", bookId);
+            if (trackId) {
+                query = query.where("trackId", "==", trackId);
+            }
+            const snap = await query.limit(200).get();
+            const items = snap.docs.map((doc) => ({
+                id: doc.id,
+                ...doc.data()
+            }));
             res.status(200).json({
                 ok: true,
-                note: doc.data()?.note || ""
+                items
             });
         }
         catch (e) {
-            logger.error("Error in /insights (GET)", e);
+            logger.error("Error in /insights (GET list)", e);
             res.status(500).json({
                 ok: false,
-                error: e?.message || "인사이트를 불러오는 중 오류가 발생했습니다."
+                error: e?.message || "인사이트 목록을 불러오는 중 오류가 발생했습니다."
             });
         }
         return;

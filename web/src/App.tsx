@@ -51,6 +51,24 @@ type ChapterContentResponse = {
   estimatedMinutes: number;
 };
 
+type UserWordItem = {
+  id: string;
+  bookId: string;
+  trackId?: string | null;
+  word?: string;
+  normalized?: string;
+  segmentIndex?: number;
+  contexts?: { text: string }[];
+};
+
+type UserInsightItem = {
+  id: string;
+  bookId: string;
+  trackId?: string | null;
+  segmentIndex?: number;
+  note?: string;
+};
+
 const FIREBASE_PROJECT_ID = "english-reading-habit-builder";
 
 const API_BASE =
@@ -73,6 +91,13 @@ function App() {
   const [health, setHealth] = useState<ApiResponseHealth | null>(null);
   const [summary, setSummary] = useState<ProgressSummary | null>(null);
   const [calendar, setCalendar] = useState<CalendarItem[]>([]);
+  // 타입 + 상태 훅 추가
+  const [wordList, setWordList] = useState<UserWordItem[]>([]);
+  const [isWordLoading, setIsWordLoading] = useState(false);
+
+  const [insightList, setInsightList] = useState<UserInsightItem[]>([]);
+  const [isInsightListLoading, setIsInsightListLoading] = useState(false);
+
   const [plan, setPlan] = useState<ReadingPlan["plan"] | null>(null);
 
   const [isSaving, setIsSaving] = useState(false);
@@ -112,6 +137,8 @@ function App() {
     reloadSummary();
     reloadCalendar();
     reloadPlan();
+    loadWords();
+    loadInsightsList();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -179,6 +206,62 @@ function App() {
         setError("읽기 계획을 불러오지 못했습니다.");
       });
   };
+
+  // 저장된 단어 목록 가져오기
+  const loadWords = async () => {
+    setIsWordLoading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/words?bookId=${encodeURIComponent(BOOK_ID)}`,
+        {
+          headers: {
+            "x-user-id": "demo-user"
+          }
+        }
+      );
+      const json = await res.json();
+      if (json.ok && Array.isArray(json.items)) {
+        setWordList(json.items as UserWordItem[]);
+      } else {
+        setWordList([]);
+      }
+    } catch (e) {
+      console.error(e);
+      // 에러는 공통 error state에 굳이 안 태워도 됨 (이미 다른 데서 보여주고 있어서)
+    } finally {
+      setIsWordLoading(false);
+    }
+  };
+
+  // 저장된 인사이트 목록 가져오기
+    const loadInsightsList = async () => {
+    setIsInsightListLoading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/insights?bookId=${encodeURIComponent(
+          BOOK_ID
+        )}&trackId=${encodeURIComponent(TRACK_ID)}`,
+        {
+          headers: {
+            "x-user-id": "demo-user"
+          }
+        }
+      );
+      const json = await res.json();
+      if (json.ok && Array.isArray(json.items)) {
+        setInsightList(json.items as UserInsightItem[]);
+      } else {
+        setInsightList([]);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsInsightListLoading(false);
+    }
+  };
+
+
+
 
   // 세그먼트 완료
   const handleCompleteSegment = async (segmentIndex: number) => {
@@ -311,6 +394,7 @@ function App() {
         return;
       }
       setLastSavedWord(word);
+      loadWords();
     } catch (e) {
       console.error(e);
       setError("단어 저장 중 오류가 발생했습니다.");
@@ -380,6 +464,8 @@ function App() {
         setError(json.error || "노트 저장에 실패했습니다.");
         return;
       }
+      // ✅ 인사이트 목록 새로고침
+      loadInsightsList();
     } catch (e) {
       console.error(e);
       setError("노트 저장 중 오류가 발생했습니다.");
@@ -772,6 +858,151 @@ function App() {
             {error}
           </div>
         )}
+
+         {/* 내 단어장 */}
+        <section className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <div className="font-medium text-sm text-slate-200">
+                내 단어장 (현재 책)
+              </div>
+              <p className="text-xs text-slate-500">
+                더블클릭으로 저장한 단어 목록입니다.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={loadWords}
+              className="text-xs px-2 py-1 rounded-md border border-slate-700 bg-slate-900/60 hover:bg-slate-800 transition-colors"
+            >
+              새로고침
+            </button>
+          </div>
+
+          {isWordLoading ? (
+            <p className="text-xs text-slate-500">단어장을 불러오는 중...</p>
+          ) : wordList.length === 0 ? (
+            <p className="text-xs text-slate-500">
+              아직 저장된 단어가 없습니다. 본문에서 단어를 더블클릭해 보세요.
+            </p>
+          ) : (
+            <div className="max-h-40 overflow-auto border border-slate-800 rounded-xl">
+              <table className="w-full text-xs text-left border-collapse">
+                <thead className="bg-slate-900/80 sticky top-0">
+                  <tr>
+                    <th className="px-3 py-2 border-b border-slate-800">
+                      단어
+                    </th>
+                    <th className="px-3 py-2 border-b border-slate-800">
+                      세그먼트
+                    </th>
+                    <th className="px-3 py-2 border-b border-slate-800">
+                      예문 (일부)
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {wordList.map((w) => {
+                    const example =
+                      w.contexts && w.contexts.length > 0
+                        ? w.contexts[0].text
+                        : "";
+                    return (
+                      <tr
+                        key={w.id}
+                        className="odd:bg-slate-900/40 even:bg-slate-900/10"
+                      >
+                        <td className="px-3 py-2 border-b border-slate-900/60">
+                          {w.word || w.normalized}
+                        </td>
+                        <td className="px-3 py-2 border-b border-slate-900/60">
+                          {w.segmentIndex != null
+                            ? `Day ${w.segmentIndex}`
+                            : "-"}
+                        </td>
+                        <td className="px-3 py-2 border-b border-slate-900/60">
+                          {example
+                            ? example.length > 50
+                              ? example.slice(0, 50) + "..."
+                              : example
+                            : "-"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+                {/* 내 인사이트 */}
+        <section className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <div className="font-medium text-sm text-slate-200">
+                내 인사이트 (현재 책)
+              </div>
+              <p className="text-xs text-slate-500">
+                각 세그먼트에 기록한 노트 목록입니다.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={loadInsightsList}
+              className="text-xs px-2 py-1 rounded-md border border-slate-700 bg-slate-900/60 hover:bg-slate-800 transition-colors"
+            >
+              새로고침
+            </button>
+          </div>
+
+          {isInsightListLoading ? (
+            <p className="text-xs text-slate-500">
+              인사이트 목록을 불러오는 중입니다...
+            </p>
+          ) : insightList.length === 0 ? (
+            <p className="text-xs text-slate-500">
+              아직 저장된 인사이트가 없습니다. 읽기 화면에서 노트를 작성해
+              보세요.
+            </p>
+          ) : (
+            <div className="max-h-40 overflow-auto border border-slate-800 rounded-xl">
+              <table className="w-full text-xs text-left border-collapse">
+                <thead className="bg-slate-900/80 sticky top-0">
+                  <tr>
+                    <th className="px-3 py-2 border-b border-slate-800">
+                      세그먼트
+                    </th>
+                    <th className="px-3 py-2 border-b border-slate-800">
+                      인사이트 내용 (일부)
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {insightList.map((item) => (
+                    <tr
+                      key={item.id}
+                      className="odd:bg-slate-900/40 even:bg-slate-900/10"
+                    >
+                      <td className="px-3 py-2 border-b border-slate-900/60">
+                        {item.segmentIndex != null
+                          ? `Day ${item.segmentIndex}`
+                          : "-"}
+                      </td>
+                      <td className="px-3 py-2 border-b border-slate-900/60">
+                        {item.note
+                          ? item.note.length > 70
+                            ? item.note.slice(0, 70) + "..."
+                            : item.note
+                          : "-"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
 
         {/* 캘린더 */}
         <section className="space-y-2">
