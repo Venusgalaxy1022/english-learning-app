@@ -40,6 +40,34 @@ const https_1 = require("firebase-functions/v2/https");
 const logger = __importStar(require("firebase-functions/logger"));
 const app = (0, app_1.initializeApp)();
 const db = (0, firestore_1.getFirestore)(app);
+// 간단한 데모용 본문 데이터 (1, 2번 세그먼트만 예시로)
+const MOCK_CHAPTER_CONTENTS = [
+    {
+        bookId: "little-women",
+        trackId: "little-women-30",
+        segmentIndex: 1,
+        title: "Day 1 · Meeting the March Sisters",
+        estimatedMinutes: 15,
+        paragraphs: [
+            "“Christmas won’t be Christmas without any presents,” grumbled Jo, lying on the rug.",
+            "It’s so dreadful to be poor!” sighed Meg, looking down at her old dress.",
+            "“I don’t think it’s fair that some girls have plenty of pretty things, and other girls nothing at all,” added little Amy with an injured sniff.",
+            "“We’ve got Father and Mother, and each other,” said Beth contentedly from her corner."
+        ]
+    },
+    {
+        bookId: "little-women",
+        trackId: "little-women-30",
+        segmentIndex: 2,
+        title: "Day 2 · A Modest Christmas",
+        estimatedMinutes: 15,
+        paragraphs: [
+            "The four young faces on which the firelight shone brightened at the cheerful words.",
+            "Poor they might be, but they were rich in love and in the simple hopes of a new year.",
+            "Outside, the winter wind rattled the windows, but inside there was warmth, laughter, and the faint scent of something baking in the oven."
+        ]
+    }
+];
 const BOOKS = [
     {
         id: "little-women",
@@ -268,6 +296,35 @@ exports.api = (0, https_1.onRequest)(async (req, res) => {
         }
         return;
     }
+    // GET /api/content?bookId=...&trackId=...&segmentIndex=...
+    if (req.method === "GET" && path === "/content") {
+        const bookId = req.query.bookId || "little-women";
+        const trackId = req.query.trackId || "little-women-30";
+        const segmentIndexRaw = req.query.segmentIndex || "1";
+        const segmentIndex = parseInt(segmentIndexRaw, 10) || 1;
+        // 목업 데이터 먼저 찾고, 없으면 기본 플레이스홀더 사용
+        const found = MOCK_CHAPTER_CONTENTS.find((c) => c.bookId === bookId &&
+            c.trackId === trackId &&
+            c.segmentIndex === segmentIndex);
+        const content = found ||
+            {
+                bookId,
+                trackId,
+                segmentIndex,
+                title: `Day ${segmentIndex} · Sample Reading`,
+                estimatedMinutes: 15,
+                paragraphs: [
+                    "This is a placeholder passage for testing the reading view.",
+                    `You are reading segment ${segmentIndex} of the book "${bookId}".`,
+                    "Later, this will be replaced with real text from the chosen classic book."
+                ]
+            };
+        res.status(200).json({
+            ok: true,
+            ...content
+        });
+        return;
+    }
     // GET /api/books/:id/chapters
     if (req.method === "GET" &&
         path.startsWith("/books/") &&
@@ -302,6 +359,263 @@ exports.api = (0, https_1.onRequest)(async (req, res) => {
             ok: true,
             plan
         });
+        return;
+    }
+    // POST /api/words  : 단어 저장 (더블클릭 용)
+    if (req.method === "POST" && path === "/words") {
+        const uid = getUid(req);
+        const body = req.body || {};
+        const { bookId, trackId, segmentIndex, word, contextText } = body;
+        if (!bookId || !word) {
+            res.status(400).json({
+                ok: false,
+                error: "bookId와 word는 필수입니다."
+            });
+            return;
+        }
+        const normalized = String(word).trim().toLowerCase();
+        if (!normalized) {
+            res.status(400).json({
+                ok: false,
+                error: "유효한 단어가 아닙니다."
+            });
+            return;
+        }
+        const segIndexNum = segmentIndex ? Number(segmentIndex) : null;
+        try {
+            // uid + bookId + normalized 조합으로 하나의 문서 사용
+            const docId = `${uid}_${bookId}_${normalized}`;
+            const ref = db.collection("userWords").doc(docId);
+            const contextEntry = contextText
+                ? {
+                    text: String(contextText),
+                    createdAt: firestore_1.FieldValue.serverTimestamp()
+                }
+                : null;
+            const updateData = {
+                uid,
+                bookId,
+                trackId: trackId || null,
+                normalized,
+                word,
+                updatedAt: firestore_1.FieldValue.serverTimestamp()
+            };
+            if (segIndexNum !== null) {
+                updateData.segmentIndex = segIndexNum;
+            }
+            if (contextEntry) {
+                updateData.contexts = firestore_1.FieldValue.arrayUnion(contextEntry);
+            }
+            await ref.set({
+                createdAt: firestore_1.FieldValue.serverTimestamp(),
+                ...updateData
+            }, { merge: true });
+            res.status(200).json({
+                ok: true,
+                message: "단어가 저장되었습니다.",
+                word: normalized
+            });
+        }
+        catch (e) {
+            logger.error("Error in /words (POST)", e);
+            res.status(500).json({
+                ok: false,
+                error: e?.message || "단어 저장 중 오류가 발생했습니다."
+            });
+        }
+        return;
+    }
+    // GET /api/words?bookId=...  : 저장 단어 리스트
+    if (req.method === "GET" && path === "/words") {
+        const uid = getUid(req);
+        const bookId = req.query.bookId;
+        try {
+            let query = db.collection("userWords").where("uid", "==", uid);
+            if (bookId) {
+                query = query.where("bookId", "==", bookId);
+            }
+            const snap = await query.orderBy("updatedAt", "desc").limit(200).get();
+            const items = snap.docs.map((doc) => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            res.status(200).json({
+                ok: true,
+                count: items.length,
+                items
+            });
+        }
+        catch (e) {
+            logger.error("Error in /words (GET)", e);
+            res.status(500).json({
+                ok: false,
+                error: e?.message || "단어 목록을 불러오는 중 오류가 발생했습니다."
+            });
+        }
+        return;
+    }
+    // POST /api/highlights : 하이라이트 추가
+    if (req.method === "POST" && path === "/highlights") {
+        const uid = getUid(req);
+        const body = req.body || {};
+        const { bookId, trackId, segmentIndex, text, color } = body;
+        if (!bookId || !text) {
+            res.status(400).json({
+                ok: false,
+                error: "bookId와 text는 필수입니다."
+            });
+            return;
+        }
+        const segIndexNum = segmentIndex ? Number(segmentIndex) : null;
+        try {
+            const ref = db.collection("userHighlights").doc();
+            await ref.set({
+                uid,
+                bookId,
+                trackId: trackId || null,
+                segmentIndex: segIndexNum,
+                highlightId: ref.id,
+                text: String(text),
+                color: color || "yellow",
+                createdAt: firestore_1.FieldValue.serverTimestamp(),
+                updatedAt: firestore_1.FieldValue.serverTimestamp()
+            });
+            res.status(200).json({
+                ok: true,
+                message: "하이라이트가 저장되었습니다.",
+                highlightId: ref.id
+            });
+        }
+        catch (e) {
+            logger.error("Error in /highlights (POST)", e);
+            res.status(500).json({
+                ok: false,
+                error: e?.message || "하이라이트 저장 중 오류가 발생했습니다."
+            });
+        }
+        return;
+    }
+    // GET /api/highlights?bookId=...&trackId=...&segmentIndex=...
+    if (req.method === "GET" && path === "/highlights") {
+        const uid = getUid(req);
+        const bookId = req.query.bookId;
+        const trackId = req.query.trackId;
+        const segmentIndexRaw = req.query.segmentIndex;
+        try {
+            let query = db.collection("userHighlights").where("uid", "==", uid);
+            if (bookId) {
+                query = query.where("bookId", "==", bookId);
+            }
+            if (trackId) {
+                query = query.where("trackId", "==", trackId);
+            }
+            if (segmentIndexRaw) {
+                const segIndexNum = Number(segmentIndexRaw);
+                query = query.where("segmentIndex", "==", segIndexNum);
+            }
+            const snap = await query.orderBy("createdAt", "asc").limit(500).get();
+            const items = snap.docs.map((doc) => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            res.status(200).json({
+                ok: true,
+                count: items.length,
+                items
+            });
+        }
+        catch (e) {
+            logger.error("Error in /highlights (GET)", e);
+            res.status(500).json({
+                ok: false,
+                error: e?.message || "하이라이트 목록을 불러오는 중 오류가 발생했습니다."
+            });
+        }
+        return;
+    }
+    // POST /api/insights : 인사이트/노트 저장 (upsert)
+    if (req.method === "POST" && path === "/insights") {
+        const uid = getUid(req);
+        const body = req.body || {};
+        const { bookId, trackId, segmentIndex, note } = body;
+        if (!bookId || !segmentIndex) {
+            res.status(400).json({
+                ok: false,
+                error: "bookId와 segmentIndex는 필수입니다."
+            });
+            return;
+        }
+        const segIndexNum = Number(segmentIndex);
+        if (!note || String(note).trim().length === 0) {
+            res.status(400).json({
+                ok: false,
+                error: "note 내용이 비어 있습니다."
+            });
+            return;
+        }
+        const docId = `${uid}_${bookId}_${trackId || "default"}_${segIndexNum}`;
+        try {
+            const ref = db.collection("userInsights").doc(docId);
+            await ref.set({
+                uid,
+                bookId,
+                trackId: trackId || null,
+                segmentIndex: segIndexNum,
+                note: String(note),
+                updatedAt: firestore_1.FieldValue.serverTimestamp(),
+                createdAt: firestore_1.FieldValue.serverTimestamp()
+            }, { merge: true });
+            res.status(200).json({
+                ok: true,
+                message: "인사이트가 저장되었습니다."
+            });
+        }
+        catch (e) {
+            logger.error("Error in /insights (POST)", e);
+            res.status(500).json({
+                ok: false,
+                error: e?.message || "인사이트 저장 중 오류가 발생했습니다."
+            });
+        }
+        return;
+    }
+    // GET /api/insights?bookId=...&trackId=...&segmentIndex=...
+    if (req.method === "GET" && path === "/insights") {
+        const uid = getUid(req);
+        const bookId = req.query.bookId;
+        const trackId = req.query.trackId;
+        const segmentIndexRaw = req.query.segmentIndex;
+        if (!bookId || !segmentIndexRaw) {
+            res.status(400).json({
+                ok: false,
+                error: "bookId와 segmentIndex는 필수입니다."
+            });
+            return;
+        }
+        const segIndexNum = Number(segmentIndexRaw);
+        const docId = `${uid}_${bookId}_${trackId || "default"}_${segIndexNum}`;
+        try {
+            const ref = db.collection("userInsights").doc(docId);
+            const doc = await ref.get();
+            if (!doc.exists) {
+                res.status(200).json({
+                    ok: true,
+                    note: null
+                });
+                return;
+            }
+            res.status(200).json({
+                ok: true,
+                note: doc.data()?.note || ""
+            });
+        }
+        catch (e) {
+            logger.error("Error in /insights (GET)", e);
+            res.status(500).json({
+                ok: false,
+                error: e?.message || "인사이트를 불러오는 중 오류가 발생했습니다."
+            });
+        }
         return;
     }
     res.status(404).json({
