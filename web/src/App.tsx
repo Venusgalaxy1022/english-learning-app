@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 
 type ApiResponseHealth = {
   message: string;
@@ -69,6 +69,15 @@ type UserInsightItem = {
   note?: string;
 };
 
+type BookReviewItem = {
+  id?: string;
+  bookId: string;
+  platform: "youtube";
+  title: string;
+  url: string;
+  channelName: string;
+};
+
 const FIREBASE_PROJECT_ID = "english-reading-habit-builder";
 
 const API_BASE =
@@ -102,6 +111,58 @@ function App() {
 
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // 단어 뜻 
+  const [selectedWord, setSelectedWord] = useState<string | null>(null);
+  const [wordMeaning, setWordMeaning] = useState<string | null>(null);
+  const [isMeaningLoading, setIsMeaningLoading] = useState(false);
+  const [meaningError, setMeaningError] = useState<string | null>(null);
+
+    const fetchWordMeaning = async (word: string) => {
+    setSelectedWord(word);
+    setWordMeaning(null);
+    setMeaningError(null);
+    setIsMeaningLoading(true);
+
+    try {
+      const res = await fetch(
+        `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(
+          word.toLowerCase()
+        )}`
+      );
+
+      if (!res.ok) {
+        throw new Error("not found");
+      }
+
+      const data = await res.json();
+      const first = Array.isArray(data) ? data[0] : null;
+      const meaning =
+        first?.meanings?.[0]?.definitions?.[0]?.definition ||
+        "뜻을 찾지 못했습니다.";
+
+      setWordMeaning(meaning);
+    } catch (e) {
+      console.error(e);
+      setMeaningError("사전에서 뜻을 찾지 못했습니다.");
+    } finally {
+      setIsMeaningLoading(false);
+    }
+  };
+    const readerRef = useRef<HTMLDivElement | null>(null);
+
+  type DefinitionPopover = {
+    word: string;
+    top: number;   // reader 박스 안에서의 Y 위치
+    left: number;  // reader 박스 안에서의 X 위치
+    meaning: string | null;
+    loading: boolean;
+    error: string | null;
+  };
+
+  const [definitionPopover, setDefinitionPopover] =
+    useState<DefinitionPopover | null>(null);
+
 
   // 읽기 화면 상태
   const [chapterContent, setChapterContent] =
@@ -163,6 +224,67 @@ function App() {
         setSummary(null);
         setError("진행도 요약을 불러오지 못했습니다.");
       });
+  };
+
+    const openDefinitionPopover = async (word: string) => {
+    if (!readerRef.current) return;
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return;
+
+    const range = selection.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+    const containerRect = readerRef.current.getBoundingClientRect();
+
+    // reader 박스 기준 위치 계산
+    const top =
+      rect.bottom - containerRect.top + readerRef.current.scrollTop + 4;
+    const left = rect.left - containerRect.left;
+
+    // 말풍선 초기 상태 (로딩 시작)
+    setDefinitionPopover({
+      word,
+      top,
+      left,
+      meaning: null,
+      loading: true,
+      error: null
+    });
+
+    try {
+      // 🔎 public dictionary API (원하면 나중에 다른 API로 교체 가능)
+      const res = await fetch(
+        `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(
+          word.toLowerCase()
+        )}`
+      );
+
+      if (!res.ok) {
+        throw new Error("not found");
+      }
+
+      const data = await res.json();
+      const first = Array.isArray(data) ? data[0] : null;
+      const meaning =
+        first?.meanings?.[0]?.definitions?.[0]?.definition ||
+        "뜻을 찾지 못했습니다.";
+
+      setDefinitionPopover((prev) =>
+        prev && prev.word === word
+          ? { ...prev, meaning, loading: false }
+          : prev
+      );
+    } catch (e) {
+      console.error(e);
+      setDefinitionPopover((prev) =>
+        prev && prev.word === word
+          ? {
+              ...prev,
+              loading: false,
+              error: "사전에서 뜻을 찾지 못했습니다."
+            }
+          : prev
+      );
+    }
   };
 
   const reloadCalendar = () => {
@@ -395,6 +517,9 @@ function App() {
       }
       setLastSavedWord(word);
       loadWords();
+      
+      // ✅ 단어 위치 기준으로 말풍선 + 뜻 불러오기
+      openDefinitionPopover(word);
     } catch (e) {
       console.error(e);
       setError("단어 저장 중 오류가 발생했습니다.");
@@ -677,17 +802,46 @@ function App() {
               </div>
 
               {/* 본문 + 더블클릭/하이라이트 이벤트 */}
-              <div
+                           <div
+                ref={readerRef}
                 onDoubleClick={handleDoubleClickReader}
                 onMouseUp={handleMouseUpReader}
-                className="max-h-72 overflow-auto rounded-lg border border-slate-800 bg-slate-900/80 px-4 py-3 space-y-3 text-sm leading-relaxed cursor-text"
+                className="relative max-h-72 overflow-auto rounded-lg border border-slate-800 bg-slate-900/80 px-4 py-3 space-y-3 text-sm leading-relaxed cursor-text"
               >
                 {chapterContent.paragraphs.map((p, idx) => (
                   <p key={idx} className="text-slate-100">
                     {p}
                   </p>
                 ))}
+
+                {definitionPopover && (
+                  <div
+                    className="absolute z-20 max-w-xs rounded-lg bg-slate-950 border border-emerald-500/70 px-3 py-2 text-xs shadow-xl"
+                    style={{
+                      top: definitionPopover.top,
+                      left: definitionPopover.left
+                    }}
+                  >
+                    <div className="font-semibold text-emerald-300 text-sm mb-1">
+                      {definitionPopover.word}
+                    </div>
+                    {definitionPopover.loading ? (
+                      <div className="text-[11px] text-slate-400">
+                        뜻을 불러오는 중...
+                      </div>
+                    ) : definitionPopover.error ? (
+                      <div className="text-[11px] text-red-400">
+                        {definitionPopover.error}
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-slate-100">
+                        {definitionPopover.meaning}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
+
 
               {/* 최근 저장 피드백 */}
               <div className="flex flex-wrap gap-3 text-[11px] text-slate-400">
