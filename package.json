@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "import:books": "node scripts/importBooks.cjs"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.6.0"
+  }
+}

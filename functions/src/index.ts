@@ -30,43 +30,6 @@ type ReadingSession = {
   chapterEnd: number;
 };
 
-type ChapterContent = {
-  bookId: string;
-  trackId: string;
-  segmentIndex: number;
-  title: string;
-  paragraphs: string[];
-  estimatedMinutes: number;
-};
-
-// 간단한 데모용 본문 데이터 (1, 2번 세그먼트만 예시로)
-const MOCK_CHAPTER_CONTENTS: ChapterContent[] = [
-  {
-    bookId: "little-women",
-    trackId: "little-women-30",
-    segmentIndex: 1,
-    title: "Day 1 · Meeting the March Sisters",
-    estimatedMinutes: 15,
-    paragraphs: [
-      "“Christmas won’t be Christmas without any presents,” grumbled Jo, lying on the rug.",
-      "It’s so dreadful to be poor!” sighed Meg, looking down at her old dress.",
-      "“I don’t think it’s fair that some girls have plenty of pretty things, and other girls nothing at all,” added little Amy with an injured sniff.",
-      "“We’ve got Father and Mother, and each other,” said Beth contentedly from her corner."
-    ]
-  },
-  {
-    bookId: "little-women",
-    trackId: "little-women-30",
-    segmentIndex: 2,
-    title: "Day 2 · A Modest Christmas",
-    estimatedMinutes: 15,
-    paragraphs: [
-      "The four young faces on which the firelight shone brightened at the cheerful words.",
-      "Poor they might be, but they were rich in love and in the simple hopes of a new year.",
-      "Outside, the winter wind rattled the windows, but inside there was warmth, laughter, and the faint scent of something baking in the oven."
-    ]
-  }
-];
 
 const BOOKS: Book[] = [
   {
@@ -353,39 +316,63 @@ export const api = onRequest(async (req, res) => {
   }
 
   // GET /api/content?bookId=...&trackId=...&segmentIndex=...
+  // /api/content를 Firestore 기반으로 바꾸기
   if (req.method === "GET" && path === "/content") {
-    const bookId = (req.query.bookId as string) || "little-women";
-    const trackId = (req.query.trackId as string) || "little-women-30";
-    const segmentIndexRaw = (req.query.segmentIndex as string) || "1";
-    const segmentIndex = parseInt(segmentIndexRaw, 10) || 1;
+    const bookId = req.query.bookId as string | undefined;
+    const trackId = req.query.trackId as string | undefined; // 아직은 사용 안 해도 OK
+    const segmentIndexRaw = req.query.segmentIndex as string | undefined;
 
-    // 목업 데이터 먼저 찾고, 없으면 기본 플레이스홀더 사용
-    const found = MOCK_CHAPTER_CONTENTS.find(
-      (c) =>
-        c.bookId === bookId &&
-        c.trackId === trackId &&
-        c.segmentIndex === segmentIndex
-    );
+    if (!bookId || !segmentIndexRaw) {
+      res.status(400).json({
+        ok: false,
+        error: "bookId와 segmentIndex는 필수입니다."
+      });
+      return;
+    }
 
-    const content: ChapterContent =
-      found ||
-      ({
+    const segmentIndex = Number(segmentIndexRaw);
+    if (!Number.isFinite(segmentIndex) || segmentIndex <= 0) {
+      res.status(400).json({
+        ok: false,
+        error: "segmentIndex는 1 이상의 숫자여야 합니다."
+      });
+      return;
+    }
+
+    const docId = `${bookId}_${segmentIndex}`;
+
+    try {
+      const ref = db.collection("bookSegments").doc(docId);
+      const snap = await ref.get();
+
+      if (!snap.exists) {
+        res.status(404).json({
+          ok: false,
+          error: "해당 세그먼트 텍스트를 찾을 수 없습니다.",
+          bookId,
+          segmentIndex
+        });
+        return;
+      }
+
+      const data = snap.data() as any;
+
+      res.status(200).json({
+        ok: true,
         bookId,
-        trackId,
+        trackId: trackId || null,
         segmentIndex,
-        title: `Day ${segmentIndex} · Sample Reading`,
-        estimatedMinutes: 15,
-        paragraphs: [
-          "This is a placeholder passage for testing the reading view.",
-          `You are reading segment ${segmentIndex} of the book "${bookId}".`,
-          "Later, this will be replaced with real text from the chosen classic book."
-        ]
-      } as ChapterContent);
-
-    res.status(200).json({
-      ok: true,
-      ...content
-    });
+        title: data.title || `Part ${segmentIndex}`,
+        paragraphs: data.paragraphs || [],
+        estimatedMinutes: data.estimatedMinutes || 15
+      });
+    } catch (e: any) {
+      logger.error("Error in /content", e);
+      res.status(500).json({
+        ok: false,
+        error: e?.message || "본문을 불러오는 중 오류가 발생했습니다."
+      });
+    }
     return;
   }
 
